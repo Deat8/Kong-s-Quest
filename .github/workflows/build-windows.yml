@@ -1,0 +1,93 @@
+name: Kong's Quest - Windows 64 bits
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Kongs-Quest-Android-v08.zip'
+      - 'Kongs-Quest-Windows-BuildKit.zip'
+      - '.github/workflows/build-windows.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-experimental:
+    runs-on: windows-2022
+    timeout-minutes: 75
+    steps:
+      - name: Baixar arquivos do projeto
+        uses: actions/checkout@v4
+
+      - name: Preparar compilador C/C++ de Windows
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make
+            unzip
+            file
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+
+      - name: Extrair núcleo v0.8 e executável Windows
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          test -s Kongs-Quest-Android-v08.zip
+          test -s Kongs-Quest-Windows-BuildKit.zip
+          mkdir -p _src _win portable
+          unzip -q Kongs-Quest-Android-v08.zip -d _src
+          unzip -q Kongs-Quest-Windows-BuildKit.zip -d _win
+          test -f _src/work/core/libretro/Makefile
+          test -f _src/work/core/journey.cpp
+          test -s _win/KongQuest-Windows.exe
+
+      - name: Compilar Snes9x customizado em DLL de Windows
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          make -C _src/work/core/libretro -j 4 platform=win CC=gcc CXX=g++ AR=ar
+          test -s _src/work/core/libretro/snes9x_libretro.dll
+          file _src/work/core/libretro/snes9x_libretro.dll
+
+      - name: Preparar programa e dependências
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cp _win/KongQuest-Windows.exe portable/
+          cp _src/work/core/libretro/snes9x_libretro.dll portable/
+          cp _src/work/core/LICENSE portable/LICENSE-Snes9x.txt
+          cp _win/LEIA-ME-WINDOWS.txt portable/
+          cp _win/FONTES-EMULADOR.txt portable/
+          objdump -p portable/snes9x_libretro.dll > _dll-dependencies.txt
+          for dll in libwinpthread-1.dll libstdc++-6.dll libgcc_s_seh-1.dll; do
+            if grep -iq "DLL Name: $dll" _dll-dependencies.txt; then
+              cp "/mingw64/bin/$dll" portable/
+            fi
+          done
+          test -s portable/KongQuest-Windows.exe
+          test -s portable/snes9x_libretro.dll
+          objdump -p portable/snes9x_libretro.dll | grep -q 'retro_load_game'
+          (cd portable && sha256sum KongQuest-Windows.exe snes9x_libretro.dll > SHA256SUMS.txt)
+
+      - name: Verificar se DLL e executável abrem no Windows
+        shell: pwsh
+        run: |
+          @'
+          import ctypes, pathlib, os
+          p = pathlib.Path('portable/snes9x_libretro.dll').resolve()
+          os.add_dll_directory(str(p.parent))
+          lib = ctypes.CDLL(str(p))
+          lib.retro_api_version.restype = ctypes.c_uint
+          assert lib.retro_api_version() == 1
+          print('PASS: DLL Windows carregou e API libretro versao 1 foi reconhecida')
+          '@ | python -
+
+      - name: Publicar pacote Windows experimental
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kongs-Quest-Windows-x64-Experimental
+          path: portable/
+          retention-days: 14
